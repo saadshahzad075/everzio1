@@ -1,87 +1,89 @@
-// ══════════════════════════════════════════════════
-// routes/upload.js — Image Upload Route
-// ══════════════════════════════════════════════════
-
 const express = require('express');
 const router = express.Router();
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const { protect, adminOnly } = require('../middleware/auth');
 
-// ── Create uploads folder if not exists ─────────────
 const uploadDir = path.join(__dirname, '../uploads/products');
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
-}
+fs.mkdirSync(uploadDir, { recursive: true });
 
-// ── Multer Storage Config ────────────────────────────
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, uploadDir);
-  },
-  filename: (req, file, cb) => {
-    // Unique filename: timestamp + random + original extension
+  destination: (_req, _file, cb) => cb(null, uploadDir),
+  filename: (_req, file, cb) => {
     const ext = path.extname(file.originalname).toLowerCase();
-    const uniqueName = `product_${Date.now()}_${Math.round(Math.random() * 1000)}${ext}`;
-    cb(null, uniqueName);
+    cb(null, `product_${crypto.randomUUID()}${ext}`);
   },
 });
 
-// ── File Filter — only images ────────────────────────
-const fileFilter = (req, file, cb) => {
-  const allowedTypes = /jpeg|jpg|png|gif|webp/;
-  const isValid =
-    allowedTypes.test(path.extname(file.originalname).toLowerCase()) &&
-    allowedTypes.test(file.mimetype);
+const allowedMime = new Set(['image/jpeg', 'image/png', 'image/webp']);
+const allowedExt = new Set(['.jpg', '.jpeg', '.png', '.webp']);
 
-  if (isValid) cb(null, true);
-  else cb(new Error('Only image files allowed (jpg, png, gif, webp)'));
+const fileFilter = (_req, file, cb) => {
+  if (!allowedMime.has(file.mimetype) || !allowedExt.has(path.extname(file.originalname).toLowerCase())) {
+    return cb(new multer.MulterError('LIMIT_UNEXPECTED_FILE', 'images'));
+  }
+  cb(null, true);
 };
 
 const upload = multer({
   storage,
   fileFilter,
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB max per file
+  limits: { fileSize: 5 * 1024 * 1024, files: 5, fields: 20, parts: 25 },
 });
 
-// ── POST /api/upload — Upload up to 5 images ────────
-router.post('/', protect, adminOnly, upload.array('images', 5), (req, res) => {
+const hasValidSignature = (filePath, mimetype) => {
+  const fd = fs.openSync(filePath, 'r');
   try {
-    if (!req.files || req.files.length === 0) {
-      return res.status(400).json({ success: false, message: 'No files uploaded.' });
-    }
-
-    // Return public URLs for each uploaded file
-    const urls = req.files.map(
-      (file) => `/uploads/products/${file.filename}`
-    );
-
-    res.json({
-      success: true,
-      message: `${urls.length} image(s) uploaded!`,
-      urls,
-    });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    const header = Buffer.alloc(12);
+    fs.readSync(fd, header, 0, 12, 0);
+    if (mimetype === 'image/jpeg') return header[0] === 0xff && header[1] === 0xd8 && header[2] === 0xff;
+    if (mimetype === 'image/png') return header.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10]));
+    if (mimetype === 'image/webp') return header.subarray(0, 4).toString() === 'RIFF' && header.subarray(8, 12).toString() === 'WEBP';
+    return false;
+  } finally {
+    fs.closeSync(fd);
   }
+};
+
+router.post('/', protect, adminOnly, (req, res, next) => {
+  upload.array('images', 5)(req, res, (err) => {
+    if (err) return next(err);
+    try {
+      if (!req.files || req.files.length === 0) {
+        return res.status(400).json({ success: false, message: 'No files uploaded.' });
+      }
+
+      const invalid = req.files.filter(file => !hasValidSignature(file.path, file.mimetype));
+      if (invalid.length) {
+        for (const file of req.files) {
+          try { fs.unlinkSync(file.path); } catch (_) {}
+        }
+        return res.status(400).json({ success: false, message: 'One or more files are not valid images.' });
+      }
+
+      const urls = req.files.map(file => `/uploads/products/${file.filename}`);
+      return res.status(201).json({ success: true, message: `${urls.length} image(s) uploaded.`, urls });
+    } catch (error) {
+      return next(error);
+    }
+  });
 });
 
-// ── DELETE /api/upload — Delete an image ────────────
-router.delete('/', protect, adminOnly, (req, res) => {
+router.delete('/', protect, adminOnly, (req, res, next) => {
   try {
-    const { filename } = req.body;
-    if (!filename) return res.status(400).json({ success: false, message: 'filename required.' });
-
-    const filePath = path.join(uploadDir, path.basename(filename));
-    if (fs.existsSync(filePath)) {
-      fs.unlinkSync(filePath);
-      res.json({ success: true, message: 'Image deleted.' });
-    } else {
-      res.status(404).json({ success: false, message: 'File not found.' });
+    const raw = String(req.body.filename || '');
+    const filename = path.basename(raw);
+    if (!filename || filename !== raw || !/^product_[a-f0-9-]+\.(jpg|jpeg|png|webp)$/i.test(filename)) {
+      return res.status(400).json({ success: false, message: 'Invalid filename.' });
     }
+    const filePath = path.join(uploadDir, filename);
+    if (!fs.existsSync(filePath)) return res.status(404).json({ success: false, message: 'File not found.' });
+    fs.unlinkSync(filePath);
+    return res.json({ success: true, message: 'Image deleted.' });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    return next(err);
   }
 });
 
