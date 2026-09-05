@@ -1,92 +1,41 @@
-// ══════════════════════════════════════════════════
-// models/Order.js — Order Schema
-// ══════════════════════════════════════════════════
-
 const mongoose = require('mongoose');
 
 const orderItemSchema = new mongoose.Schema({
-  productId: { type: mongoose.Schema.Types.Mixed },
+  productId: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', required: true },
   name: { type: String, required: true },
-  price: { type: Number, required: true },
+  price: { type: Number, required: true, min: 0 },
   image: { type: String, default: '' },
-  qty: { type: Number, required: true, min: 1 },
-});
+  qty: { type: Number, required: true, min: 1, max: 1000 },
+}, { _id: false });
 
-const orderSchema = new mongoose.Schema(
-  {
-    // Customer info — either logged-in user or guest
-    userId: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'User',
-      default: null, // null = guest checkout
-    },
-
-    // Shipping details
-    shipping: {
-      name: { type: String, required: true },
-      phone: { type: String, required: true },
-      phone2: { type: String, default: '' },
-      address: { type: String, required: true },
-      city: { type: String, required: true },
-    },
-
-    // Order items
-    items: {
-      type: [orderItemSchema],
-      required: true,
-      validate: {
-        validator: (arr) => arr.length >= 1,
-        message: 'Order must have at least one item',
-      },
-    },
-
-    // Pricing
-    subtotal: { type: Number, required: true },
-    deliveryCharges: { type: Number, default: 150 },
-    total: { type: Number, required: true },
-
-    // Payment
-    payment: {
-      method: {
-        type: String,
-        enum: ['cod', 'jazzcash', 'easypaisa', 'stripe', 'bank'],
-        required: true,
-      },
-      status: {
-        type: String,
-        enum: ['pending', 'paid', 'failed', 'refunded'],
-        default: 'pending',
-      },
-      transactionId: { type: String, default: '' },
-      // Stripe payment intent ID (for card payments)
-      stripePaymentIntentId: { type: String, default: '' },
-    },
-
-    // Order lifecycle status
-    status: {
-      type: String,
-      enum: ['pending', 'confirmed', 'processing', 'shipped', 'delivered', 'cancelled'],
-      default: 'pending',
-    },
-
-    // Admin notes
-    notes: { type: String, default: '' },
+const orderSchema = new mongoose.Schema({
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  shipping: {
+    name: { type: String, required: true, trim: true, maxlength: 100 },
+    phone: { type: String, required: true, trim: true, maxlength: 30 },
+    phone2: { type: String, default: '', trim: true, maxlength: 30 },
+    address: { type: String, required: true, trim: true, maxlength: 500 },
+    city: { type: String, required: true, trim: true, maxlength: 100 },
   },
-  {
-    timestamps: true,
-  }
-);
+  items: { type: [orderItemSchema], required: true, validate: arr => arr.length >= 1 },
+  subtotal: { type: Number, required: true, min: 0 },
+  deliveryCharges: { type: Number, default: 150, min: 0 },
+  total: { type: Number, required: true, min: 0 },
+  payment: {
+    method: { type: String, enum: ['cod', 'jazzcash', 'easypaisa', 'stripe', 'bank'], required: true },
+    status: { type: String, enum: ['pending', 'paid', 'failed', 'refunded'], default: 'pending' },
+    transactionId: { type: String, default: '', trim: true, maxlength: 200 },
+    stripePaymentIntentId: { type: String, default: '', trim: true, maxlength: 200 },
+  },
+  status: { type: String, enum: ['pending', 'confirmed', 'processing', 'shipped', 'delivered', 'cancelled'], default: 'pending' },
+  notes: { type: String, default: '', maxlength: 2000 },
+  idempotencyKey: { type: String, unique: true, sparse: true, index: true, maxlength: 100 },
+}, { timestamps: true });
 
-// Index for fast queries
-orderSchema.index({ userId: 1 });
-orderSchema.index({ status: 1 });
+orderSchema.index({ userId: 1, createdAt: -1 });
+orderSchema.index({ status: 1, createdAt: -1 });
 orderSchema.index({ createdAt: -1 });
-
-// Virtual: short order ID for display
-orderSchema.virtual('shortId').get(function () {
-  return this._id.toString().slice(-8).toUpperCase();
-});
-
+orderSchema.virtual('shortId').get(function () { return this._id.toString().slice(-8).toUpperCase(); });
 orderSchema.set('toJSON', { virtuals: true });
 
 module.exports = mongoose.model('Order', orderSchema);
