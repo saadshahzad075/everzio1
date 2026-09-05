@@ -11,27 +11,18 @@ fs.mkdirSync(uploadDir, { recursive: true });
 
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, uploadDir),
-  filename: (_req, file, cb) => {
-    const ext = path.extname(file.originalname).toLowerCase();
-    cb(null, `product_${crypto.randomUUID()}${ext}`);
-  },
+  filename: (_req, file, cb) => cb(null, `product_${crypto.randomUUID()}${path.extname(file.originalname).toLowerCase()}`),
 });
 
 const allowedMime = new Set(['image/jpeg', 'image/png', 'image/webp']);
 const allowedExt = new Set(['.jpg', '.jpeg', '.png', '.webp']);
-
 const fileFilter = (_req, file, cb) => {
   if (!allowedMime.has(file.mimetype) || !allowedExt.has(path.extname(file.originalname).toLowerCase())) {
     return cb(new multer.MulterError('LIMIT_UNEXPECTED_FILE', 'images'));
   }
   cb(null, true);
 };
-
-const upload = multer({
-  storage,
-  fileFilter,
-  limits: { fileSize: 5 * 1024 * 1024, files: 5, fields: 20, parts: 25 },
-});
+const upload = multer({ storage, fileFilter, limits: { fileSize: 5 * 1024 * 1024, files: 5, fields: 20, parts: 25 } });
 
 const hasValidSignature = (filePath, mimetype) => {
   const fd = fs.openSync(filePath, 'r');
@@ -42,32 +33,24 @@ const hasValidSignature = (filePath, mimetype) => {
     if (mimetype === 'image/png') return header.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10]));
     if (mimetype === 'image/webp') return header.subarray(0, 4).toString() === 'RIFF' && header.subarray(8, 12).toString() === 'WEBP';
     return false;
-  } finally {
-    fs.closeSync(fd);
-  }
+  } finally { fs.closeSync(fd); }
 };
 
 router.post('/', protect, adminOnly, (req, res, next) => {
   upload.array('images', 5)(req, res, (err) => {
-    if (err) return next(err);
+    if (err) {
+      if (err instanceof multer.MulterError) return res.status(400).json({ success: false, message: 'Invalid upload. Images must be JPG, PNG or WEBP and no larger than 5MB each.' });
+      return next(err);
+    }
     try {
-      if (!req.files || req.files.length === 0) {
-        return res.status(400).json({ success: false, message: 'No files uploaded.' });
-      }
-
-      const invalid = req.files.filter(file => !hasValidSignature(file.path, file.mimetype));
-      if (invalid.length) {
-        for (const file of req.files) {
-          try { fs.unlinkSync(file.path); } catch (_) {}
-        }
+      if (!req.files?.length) return res.status(400).json({ success: false, message: 'No files uploaded.' });
+      if (req.files.some(file => !hasValidSignature(file.path, file.mimetype))) {
+        for (const file of req.files) { try { fs.unlinkSync(file.path); } catch (_) {} }
         return res.status(400).json({ success: false, message: 'One or more files are not valid images.' });
       }
-
       const urls = req.files.map(file => `/uploads/products/${file.filename}`);
       return res.status(201).json({ success: true, message: `${urls.length} image(s) uploaded.`, urls });
-    } catch (error) {
-      return next(error);
-    }
+    } catch (error) { return next(error); }
   });
 });
 
@@ -82,9 +65,7 @@ router.delete('/', protect, adminOnly, (req, res, next) => {
     if (!fs.existsSync(filePath)) return res.status(404).json({ success: false, message: 'File not found.' });
     fs.unlinkSync(filePath);
     return res.json({ success: true, message: 'Image deleted.' });
-  } catch (err) {
-    return next(err);
-  }
+  } catch (err) { return next(err); }
 });
 
 module.exports = router;
