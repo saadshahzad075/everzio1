@@ -1,93 +1,101 @@
-// ══════════════════════════════════════════════════
-// server.js — Everzio Express Backend
-// ══════════════════════════════════════════════════
-
+// Everzio — production-hardened Express backend
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const helmet = require('helmet');
 const path = require('path');
 const connectDB = require('./config/db');
+const mongoose = require('mongoose');
+const { corsOptions, apiLimiter, requestId } = require('./middleware/security');
 
 const app = express();
+const PORT = Number(process.env.PORT || 5000);
 
-// ── Connect to MongoDB ───────────────────────────────
-connectDB();
+app.disable('x-powered-by');
+app.set('trust proxy', process.env.TRUST_PROXY === 'true' ? 1 : false);
 
-// ── CORS — allow frontend to talk to backend ─────────
-app.use(
-  cors({
-    origin: [
-      process.env.FRONTEND_URL || 'http://localhost:3000',
-      'http://localhost:5500',   // Live Server (VS Code)
-      'http://127.0.0.1:5500',
-      'http://localhost:3000',
-    ],
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
-  })
-);
+app.use(requestId);
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: 'cross-origin' },
+  contentSecurityPolicy: false,
+}));
+app.use(cors(corsOptions));
+app.use('/api', apiLimiter);
+app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || '1mb' }));
+app.use(express.urlencoded({ extended: true, limit: process.env.URLENCODED_BODY_LIMIT || '1mb' }));
 
-// ── Body Parsers ─────────────────────────────────────
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
-
-// ── Serve Uploaded Images Publicly ───────────────────
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
-
-// ── Serve static frontend files ──────────────────────
+// Product images are intentionally public, but upload/write access is protected by the upload route.
+app.use('/uploads', express.static(path.join(__dirname, 'uploads'), {
+  index: false,
+  dotfiles: 'deny',
+  maxAge: process.env.NODE_ENV === 'production' ? '7d' : 0,
+}));
 app.use(express.static(path.join(__dirname, '../frontend')));
 
-// ── API Routes ───────────────────────────────────────
+// Connect before serving application traffic.
+connectDB();
+
 app.use('/api', require('./routes/auth'));
 app.use('/api/products', require('./routes/products'));
 app.use('/api/cart', require('./routes/cart'));
 app.use('/api/order', require('./routes/orders'));
 app.use('/api/orders', require('./routes/orders'));
 app.use('/api/admin', require('./routes/admin'));
-app.use('/api/upload', require('./routes/upload'));  // Image Upload
+app.use('/api/upload', require('./routes/upload'));
 
-// ── Health Check ─────────────────────────────────────
 app.get('/api/health', (req, res) => {
   res.json({
     success: true,
-    message: 'Everzio API is running! 🚀',
-    environment: process.env.NODE_ENV,
+    status: 'ok',
+    service: 'everzio-api',
+    environment: process.env.NODE_ENV || 'development',
     timestamp: new Date().toISOString(),
+    requestId: req.requestId,
   });
 });
 
-// ── Serve frontend for all non-API routes ─────────────
-// (SPA-style fallback)
+app.get('/api/ready', (req, res) => {
+  const ready = mongoose.connection.readyState === 1;
+  res.status(ready ? 200 : 503).json({
+    success: ready,
+    status: ready ? 'ready' : 'not_ready',
+    database: mongoose.connection.readyState,
+    requestId: req.requestId,
+  });
+});
+
 app.get('*', (req, res) => {
   if (!req.path.startsWith('/api')) {
     res.sendFile(path.join(__dirname, '../frontend/index.html'));
   } else {
-    res.status(404).json({ success: false, message: 'API route not found.' });
+    res.status(404).json({ success: false, message: 'API route not found.', requestId: req.requestId });
   }
 });
 
-// ── Global Error Handler ─────────────────────────────
 app.use((err, req, res, next) => {
-  console.error('Unhandled error:', err);
-  res.status(err.status || 500).json({
-    success: false,
-    message: err.message || 'Internal server error.',
-  });
+  console.error('Unhandled error', { requestId: req.requestId, name: err.name, message: err.message });
+  const status = Number(err.status || err.statusCode) || 500;
+  const safeMessage = status >= 500 ? 'Internal server error.' : err.message;
+  res.status(status).json({ success: false, message: safeMessage, requestId: req.requestId });
 });
 
-// ── Start Server ─────────────────────────────────────
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-  console.log('');
-  console.log('╔═══════════════════════════════════════╗');
-  console.log('║       EVERZIO BACKEND RUNNING         ║');
-  console.log('╠═══════════════════════════════════════╣');
-  console.log(`║  API:      http://localhost:${PORT}/api   ║`);
-  console.log(`║  Health:   http://localhost:${PORT}/api/health ║`);
-  console.log(`║  Mode:     ${process.env.NODE_ENV || 'development'}                  ║`);
-  console.log('╚═══════════════════════════════════════╝');
-  console.log('');
+const server = app.listen(PORT, () => {
+  console.log(`Everzio API listening on port ${PORT} (${process.env.NODE_ENV || 'development'})`);
 });
+
+const shutdown = async (signal) => {
+  console.log(`${signal} received; shutting down gracefully...`);
+  server.close(async () => {
+    try {
+      await mongoose.connection.close(false);
+    } finally {
+      process.exit(0);
+    }
+  });
+  setTimeout(() => process.exit(1), 10000).unref();
+};
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 
 module.exports = app;
